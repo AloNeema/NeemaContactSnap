@@ -1,0 +1,25 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "useDefineForClassFields": true,
+    "module": "ESNext",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "skipLibCheck": true,
+    "moduleResolution": "Bundler",
+    "allowImportingTsExtensions": false,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "strict": true,
+    "noUnusedLocals": false,
+    "noUnusedParameters": false,
+    "noFallthroughCasesInSwitch": true,
+    "baseUrl": ".",
+    "paths": {
+      "@contactsnap/shared-types": ["packages/shared-types/src/index.ts"],
+      "@contactsnap/parser": ["packages/parser/src/index.ts"],
+      "@contactsnap/integrations-google": ["packages/integrations-google/src/index.ts"],
+      "@contactsnap/integrations-microsoft": ["packages/integrations-microsoft/src/index.ts"],
+      "@contactsnap/ui": ["packages/ui/src/index.tsx"]
+    }
+  }
+}
