@@ -1,0 +1,17 @@
+{
+  "name": "@contactsnap/desktop",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "echo \"Tauri shell scaffolded. Run the web app while native capabilities are wired.\"",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@contactsnap/parser": "0.1.0",
+    "@contactsnap/shared-types": "0.1.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.8.0"
+  }
+}
