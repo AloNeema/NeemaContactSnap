@@ -1,3 +1,4 @@
+import { parsePhoneNumberFromString } from "libphonenumber-js";
 import type {
   DuplicateMatch,
   FieldEvidence,
@@ -9,11 +10,23 @@ import type {
 } from "@contactsnap/shared-types";
 
 const emailRegex = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi;
-const urlRegex = /\b(?:https?:\/\/)?(?:www\.)?[a-z0-9-]+(?:\.[a-z0-9-]+)+[^\s,;)]*/gi;
+// The final dot-segment must be an alphabetic TLD so dotted phone numbers
+// (561.555.9900) and currency amounts (500.00) never read as websites.
+const urlRegex = /\b(?:https?:\/\/)?(?:www\.)?[a-z0-9-]+(?:\.[a-z0-9-]+)*\.[a-z]{2,}(?:\/[^\s,;)]*)?/gi;
 const linkedInRegex = /\b(?:https?:\/\/)?(?:[a-z]{2,3}\.)?linkedin\.com\/(?:in|company)\/[^\s,;)]+/i;
-const phoneRegex = /(?:(?:mobile|cell|m|direct|office|work|phone|tel|t|fax|f)[\s:.-]*)?(?:\+?\d[\d\s().-]{7,}\d)(?:\s*(?:x|ext\.?)\s*\d+)?/gi;
-const streetRegex = /\b\d{1,6}\s+[A-Za-z0-9.' -]+(?:Street|St\.?|Avenue|Ave\.?|Road|Rd\.?|Boulevard|Blvd\.?|Drive|Dr\.?|Lane|Ln\.?|Way|Suite|Ste\.?|Floor|Fl\.?)\b[^\n]*/i;
-const cityStateRegex = /\b([A-Z][A-Za-z .'-]+),\s*([A-Z]{2}|[A-Za-z .'-]+)\s+([A-Z0-9][A-Z0-9 -]{2,10})\b/;
+const phoneCandidateRegex = /(?:(?:mobile|cellular|cell|direct|office|work|phone|tel|fax|ph|[dcmotfw])[\s:.-]{1,3})?\(?\+?\d[\d\s().-]{6,}\d(?:\s*(?:x|ext\.?|extension)[\s:.]*\d+)?/gi;
+const phoneLabelRegex = /^(mobile|cellular|cell|direct|office|work|phone|tel|fax|ph|[dcmotfw])[\s:.-]{1,3}/i;
+const streetRegex = /\b(?:P\.?O\.?\s+Box\s+\d+|\d{1,6}\s+[A-Za-z0-9.' -]+(?:Street|St\.?|Avenue|Ave\.?|Road|Rd\.?|Boulevard|Blvd\.?|Drive|Dr\.?|Lane|Ln\.?|Way|Highway|Hwy\.?|Court|Ct\.?|Place|Pl\.?|Circle|Cir\.?|Parkway|Pkwy\.?|Terrace|Ter\.?|Broadway|Plaza|Square|Sq\.?|Suite|Ste\.?|Floor|Fl\.?))\b[^\n|]*/i;
+// City lines must start with a letter and carry a real postal-code shape so
+// street lines like "1200 N. Federal Hwy, Suite 200" cannot match.
+const cityStateRegex = /^([A-Z][A-Za-z .'-]+),\s*([A-Z]{2}|[A-Za-z .'-]+)\s+(\d{5}(?:-\d{4})?|[A-Z0-9][A-Z0-9 -]{2,9}\d)$/;
+const headerLineRegex = /^(?:from|to|cc|bcc|sent|date|subject|reply-to|fwd?|re)\s*:/i;
+const emailHeaderNameRegex = /^(?:from|reply-to)\s*:\s*"?([^"<\n]+?)"?\s*<\s*([A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,})\s*>/gim;
+const bareNameEmailRegex = /^"?([^"<\n:@]+?)"?\s*<\s*([A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,})\s*>/gim;
+const signOffRegex = /^(?:thanks|thank you|many thanks|best|all the best|best regards|kind regards|warm regards|regards|sincerely|cheers|talk soon|warmly|respectfully|take care)[,!.]?$/i;
+const nameLabelRegex = /^(?:contact|attn|name)\s*[:\-]\s*/i;
+const credentialSuffixRegex = /,\s*(?:mba|cpa|phd|ph\.?d\.?|md|esq\.?|jd|cfa|cfp|pmp|pe|rn|jr\.?|sr\.?|ii|iii|iv)\b\.?/gi;
+const nameRegex = /^\p{Lu}[\p{L}.'’-]+(?:\s+\p{Lu}[\p{L}.'’-]+){1,3}$/u;
 const disposableDomainWords = ["gmail", "icloud", "outlook", "hotmail", "yahoo", "proton", "me", "aol"];
 
 const titleWords = [
@@ -38,32 +51,28 @@ const titleWords = [
   "consultant",
   "advisor",
   "associate",
+  "officer",
+  "executive",
   "vp",
   "vice president",
   "head of"
 ];
 
-const companySuffixes = [
-  "inc",
-  "inc.",
-  "llc",
-  "l.l.c.",
-  "ltd",
-  "ltd.",
-  "corp",
-  "corp.",
-  "corporation",
-  "company",
-  "co.",
-  "group",
-  "partners",
-  "studios",
-  "labs",
-  "systems",
-  "solutions",
-  "capital",
-  "ventures"
-];
+const titleWordRegex = new RegExp(`\\b(?:${titleWords.join("|")})\\b`, "i");
+
+// A company line must END with one of these tokens. Substring matching caused
+// lines like "Subject: RE: Working capital application" to become companies.
+const companySuffixRegex = /\b(?:inc|llc|l\.l\.c|ltd|corp|corporation|company|co|gmbh|ag|plc|sa|sas|bv|oy|ab|srl|pty|kk|group|partners|studios?|labs?|systems|solutions|capital|ventures|holdings|advisors|associates|agency|bank|financial|funding|consulting|technologies|tech|software|media)\.?$/i;
+
+// Weighted overall confidence: missing required fields drag the score down so
+// non-contact text can no longer score high off incidental matches.
+const confidenceWeights: Record<string, number> = {
+  fullName: 0.3,
+  emails: 0.3,
+  phones: 0.2,
+  company: 0.1,
+  title: 0.1
+};
 
 export function parseContact(input: ParseContactInput): ParsedContact {
   const sourceText = input.text.trim();
@@ -75,27 +84,24 @@ export function parseContact(input: ParseContactInput): ParsedContact {
     return emptyContact(input.text, input.source, ["No contact text was provided."]);
   }
 
-  const lines = sourceText
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .filter((line) => !isDisclaimerLine(line));
+  const headerName = extractHeaderName(sourceText);
+  const segments = toSegments(sourceText);
 
-  const emails = unique(sourceText.match(emailRegex) ?? []).map((email) => email.toLowerCase());
-  const urls = unique(sourceText.match(urlRegex) ?? []).map(cleanUrl);
-  const linkedinUrl = urls.find((url) => linkedInRegex.test(url));
-  const website = urls.find((url) => !url.includes("@") && !/linkedin\.com|twitter\.com|x\.com|facebook\.com|instagram\.com/i.test(url));
+  const emails = orderEmails(unique(sourceText.match(emailRegex) ?? []).map((email) => email.toLowerCase()), headerName?.email);
   const phones = extractPhones(sourceText);
-  const address = extractAddress(lines);
-  const fullName = extractName(lines, emails);
+  const urls = extractUrls(sourceText);
+  const linkedinUrl = urls.find((url) => linkedInRegex.test(url));
+  const website = urls.find((url) => !/linkedin\.com|twitter\.com|x\.com|facebook\.com|instagram\.com/i.test(url));
+  const address = extractAddress(segments);
+  const fullName = headerName?.name ?? extractName(segments, emails);
   const { firstName, lastName } = splitName(fullName);
-  const title = extractTitle(lines, fullName);
-  const company = extractCompany(lines, emails, title, fullName);
+  const { title, companyHint, titleSourceSegment } = extractTitle(segments, fullName);
+  const company = extractCompany(segments, emails, titleSourceSegment, fullName, companyHint);
   const sourceEmailDomain = emails[0]?.split("@")[1];
 
   addEvidence(sourceText, fieldEvidence, fieldConfidence, "emails", emails.join(", "), emails[0] ?? "", emails.length ? 0.98 : 0, "Matched a valid email address pattern.");
-  addEvidence(sourceText, fieldEvidence, fieldConfidence, "phones", phones.map((phone) => phone.value).join(", "), phones[0]?.evidence ?? "", phones.length ? phoneAggregateConfidence(phones) : 0, "Matched phone-like numbers and classified labels such as mobile, office, or fax.");
-  addEvidence(sourceText, fieldEvidence, fieldConfidence, "fullName", fullName, fullName, fullNameConfidence(fullName, emails), "Selected the strongest person-name line or inferred it from the email local part.");
+  addEvidence(sourceText, fieldEvidence, fieldConfidence, "phones", phones.map((phone) => phone.value).join(", "), phones[0]?.evidence ?? "", phones.length ? phoneAggregateConfidence(phones) : 0, "Matched and validated phone numbers, then classified labels such as mobile, office, or fax.");
+  addEvidence(sourceText, fieldEvidence, fieldConfidence, "fullName", fullName, fullName, fullNameConfidence(fullName, emails, Boolean(headerName?.name)), headerName?.name ? "Took the display name from an email header." : "Selected the strongest person-name line or inferred it from the email local part.");
   addEvidence(sourceText, fieldEvidence, fieldConfidence, "title", title, title, title ? titleConfidence(title) : 0, "Matched a job-title keyword on a short signature line.");
   addEvidence(sourceText, fieldEvidence, fieldConfidence, "company", company, company, company ? companyConfidence(company, emails) : 0, "Selected an organization-looking line or inferred the company from the email domain.");
   addEvidence(sourceText, fieldEvidence, fieldConfidence, "website", website, website, website ? 0.86 : 0, "Matched a URL that was not a social profile.");
@@ -106,12 +112,11 @@ export function parseContact(input: ParseContactInput): ParsedContact {
 
   if (!emails.length) warnings.push("No email address was detected. Add one before saving to avoid creating an unusable contact.");
   if (!fullName) warnings.push("No confident person name was detected. Review the name field before saving.");
-  if (detectMultipleContacts(sourceText).length > 1) warnings.push("Multiple contacts may be present. Choose one contact or create each separately before saving.");
+  if (countLikelyContacts(sourceText) > 1) warnings.push("Multiple contacts may be present. Choose one contact or create each separately before saving.");
 
-  const confidenceValues = Object.values(fieldConfidence).filter((value) => value > 0);
-  const confidence = confidenceValues.length
-    ? round(confidenceValues.reduce((sum, value) => sum + value, 0) / confidenceValues.length)
-    : 0.25;
+  const confidence = round(
+    Object.entries(confidenceWeights).reduce((sum, [field, weight]) => sum + weight * (fieldConfidence[field] ?? 0), 0)
+  );
 
   return {
     fullName,
@@ -124,7 +129,7 @@ export function parseContact(input: ParseContactInput): ParsedContact {
     website,
     linkedinUrl,
     address,
-    notes: buildNotes(lines),
+    notes: buildNotes(segments),
     sourceText,
     source: input.source ?? "unknown",
     sourceEmailDomain,
@@ -137,14 +142,23 @@ export function parseContact(input: ParseContactInput): ParsedContact {
 }
 
 export function detectMultipleContacts(text: string): ParsedContact[] {
+  const likelyChunks = splitContactChunks(text);
+  if (likelyChunks.length <= 1) return [];
+  return likelyChunks.map((chunk) => parseContact({ text: chunk, source: "unknown" }));
+}
+
+function splitContactChunks(text: string): string[] {
   const chunks = text
     .split(/\n\s*(?:-{3,}|_{3,}|={3,})\s*\n|(?=\n[A-Z][a-z]+ [A-Z][a-z]+(?:\s*\n)(?:[^\n@]+)?\n?[A-Z0-9._%+-]+@)/)
     .map((chunk) => chunk.trim())
     .filter((chunk) => chunk.length > 8);
+  return chunks.filter((chunk) => (chunk.match(emailRegex) ?? []).length || (chunk.match(phoneCandidateRegex) ?? []).length);
+}
 
-  const likelyChunks = chunks.filter((chunk) => (chunk.match(emailRegex) ?? []).length || (chunk.match(phoneRegex) ?? []).length);
-  if (likelyChunks.length <= 1) return [];
-  return likelyChunks.map((chunk) => parseContact({ text: chunk, source: "unknown" }));
+// Cheap chunk count used inside parseContact for the multi-contact warning,
+// so parseContact and detectMultipleContacts are no longer mutually recursive.
+function countLikelyContacts(text: string): number {
+  return splitContactChunks(text).length;
 }
 
 export function findDuplicateContacts(candidate: ParsedContact, existing: ParsedContact[]): DuplicateMatch[] {
@@ -155,7 +169,9 @@ export function findDuplicateContacts(candidate: ParsedContact, existing: Parsed
       const candidateEmails = new Set(candidate.emails.map(normalizeEmail));
       const contactEmails = new Set(contact.emails.map(normalizeEmail));
       if ([...candidateEmails].some((email) => contactEmails.has(email))) {
-        score += 0.7;
+        // An exact email match is the strongest identity signal and should
+        // recommend updating the existing contact on its own.
+        score += 0.85;
         reasons.push("matching email");
       }
 
@@ -188,31 +204,84 @@ export function findDuplicateContacts(candidate: ParsedContact, existing: Parsed
     .sort((a, b) => b.score - a.score);
 }
 
-function extractPhones(text: string): ParsedPhone[] {
-  return unique(text.match(phoneRegex) ?? [])
-    .map((raw) => {
-      const type = inferPhoneType(raw);
-      const value = normalizePhoneDisplay(raw);
-      return { type, value, confidence: scorePhone(raw, type), evidence: raw.trim() };
-    })
-    .filter((phone) => normalizePhone(phone.value).length >= 10);
+function extractHeaderName(text: string): { name: string; email: string } | undefined {
+  for (const regex of [emailHeaderNameRegex, bareNameEmailRegex]) {
+    regex.lastIndex = 0;
+    const match = regex.exec(text);
+    if (!match) continue;
+    const name = cleanNameCandidate(match[1]);
+    if (name && nameRegex.test(name)) {
+      return { name, email: match[2].toLowerCase() };
+    }
+  }
+  return undefined;
 }
 
-function inferPhoneType(raw: string): PhoneType {
-  const value = raw.toLowerCase();
-  if (/\b(mobile|cell|cellular|m)\b/.test(value)) return "mobile";
-  if (/\b(fax|f)\b/.test(value)) return "fax";
-  if (/\b(office|work|direct|phone|tel|t)\b/.test(value)) return "office";
+function orderEmails(emails: string[], headerEmail?: string): string[] {
+  if (!headerEmail || !emails.includes(headerEmail)) return emails;
+  return [headerEmail, ...emails.filter((email) => email !== headerEmail)];
+}
+
+// Split lines and pipe/bullet-separated segments so signatures like
+// "John Smith | Senior Loan Officer | Quick Capital Funding" classify per part.
+function toSegments(text: string): string[] {
+  return text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .filter((line) => !isDisclaimerLine(line) && !headerLineRegex.test(line))
+    .flatMap((line) => line.split(/\s*[|•·]\s*|\s+[–—]\s+/))
+    .map((segment) => segment.trim())
+    .filter(Boolean);
+}
+
+// Emails are blanked out first so local parts ("sarah.obrien@…") and domains
+// that only appear inside an address can never be misread as websites.
+function extractUrls(text: string): string[] {
+  const textWithoutEmails = text.replace(emailRegex, " ");
+  return unique(textWithoutEmails.match(urlRegex) ?? [])
+    .map(cleanUrl)
+    .filter((url, index, all) => all.indexOf(url) === index);
+}
+
+function extractPhones(text: string): ParsedPhone[] {
+  const results: ParsedPhone[] = [];
+  const seen = new Set<string>();
+  for (const raw of unique(text.match(phoneCandidateRegex) ?? [])) {
+    const labelMatch = raw.match(phoneLabelRegex);
+    const label = labelMatch?.[1]?.toLowerCase();
+    const numberText = raw.replace(phoneLabelRegex, "").trim();
+    const parsed = parsePhoneNumberFromString(numberText, "US");
+    if (!parsed || !parsed.isPossible()) continue;
+    const key = parsed.number;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const type = phoneTypeFromLabel(label);
+    results.push({
+      type,
+      value: parsed.country === "US" ? parsed.formatNational() : parsed.formatInternational(),
+      confidence: round((parsed.isValid() ? 0.9 : 0.6) + (type === "unknown" ? 0 : 0.05)),
+      evidence: raw.trim()
+    });
+  }
+  return results;
+}
+
+function phoneTypeFromLabel(label?: string): PhoneType {
+  if (!label) return "unknown";
+  if (["mobile", "cell", "cellular", "m", "c"].includes(label)) return "mobile";
+  if (["fax", "f"].includes(label)) return "fax";
+  if (["office", "work", "direct", "phone", "tel", "ph", "d", "o", "t", "w"].includes(label)) return "office";
   return "unknown";
 }
 
-function normalizePhoneDisplay(raw: string): string {
-  return raw.replace(/^(mobile|cell|m|direct|office|work|phone|tel|t|fax|f)[\s:.-]*/i, "").replace(/\s+/g, " ").trim();
-}
-
-function extractAddress(lines: string[]): ParsedAddress | undefined {
-  const streetLine = lines.find((line) => streetRegex.test(line));
-  const cityStateLine = lines.find((line) => !streetRegex.test(line) && cityStateRegex.test(line));
+function extractAddress(segments: string[]): ParsedAddress | undefined {
+  const streetIndex = segments.findIndex((segment) => streetRegex.test(segment));
+  const streetLine = streetIndex >= 0 ? segments[streetIndex].match(streetRegex)?.[0] : undefined;
+  // Only look for the city/state/postal line after the street line, so suite
+  // numbers on the street line can never be misread as a state and ZIP.
+  const citySearchSpace = streetIndex >= 0 ? segments.slice(streetIndex + 1) : segments;
+  const cityStateLine = citySearchSpace.find((segment) => cityStateRegex.test(segment));
   if (!streetLine && !cityStateLine) return undefined;
 
   const cityMatch = cityStateLine?.match(cityStateRegex);
@@ -221,18 +290,27 @@ function extractAddress(lines: string[]): ParsedAddress | undefined {
     city: cityMatch?.[1],
     state: cityMatch?.[2],
     postalCode: cityMatch?.[3],
-    country: inferCountry(lines)
+    country: inferCountry(segments)
   };
 }
 
-function extractName(lines: string[], emails: string[]): string | undefined {
-  const candidates = lines.filter((line) => {
-    if (line.length > 48 || line.includes("@") || /https?:|www\.|linkedin\.com/i.test(line)) return false;
-    if (/[0-9]/.test(line) || isTitleLine(line) || isCompanyLine(line)) return false;
-    return /^[A-Z][A-Za-z.'-]+(?:\s+[A-Z][A-Za-z.'-]+){1,3}$/.test(line);
-  });
+function cleanNameCandidate(value: string): string {
+  return value
+    .replace(nameLabelRegex, "")
+    .replace(credentialSuffixRegex, "")
+    .replace(/[,\s]+$/, "")
+    .trim();
+}
 
-  if (candidates[0]) return candidates[0];
+function extractName(segments: string[], emails: string[]): string | undefined {
+  for (const segment of segments) {
+    if (segment.length > 48 || segment.includes("@") || /https?:|www\.|linkedin\.com/i.test(segment)) continue;
+    if (/[0-9]/.test(segment) || signOffRegex.test(segment)) continue;
+    const cleaned = cleanNameCandidate(segment);
+    if (!cleaned || isTitleLine(cleaned) || isCompanyLine(cleaned)) continue;
+    if (nameRegex.test(cleaned)) return cleaned;
+  }
+
   const emailLocal = emails[0]?.split("@")[0].replace(/[._-]+/g, " ");
   if (emailLocal && /^[a-z]+ [a-z]+$/i.test(emailLocal)) {
     return titleCase(emailLocal);
@@ -246,34 +324,42 @@ function splitName(fullName?: string): { firstName?: string; lastName?: string }
   return { firstName: parts[0], lastName: parts.length > 1 ? parts[parts.length - 1] : undefined };
 }
 
-function extractTitle(lines: string[], fullName?: string): string | undefined {
-  return lines.find((line) => line !== fullName && isTitleLine(line) && line.length < 80);
+function extractTitle(segments: string[], fullName?: string): { title?: string; companyHint?: string; titleSourceSegment?: string } {
+  const line = segments.find((segment) => segment !== fullName && segment.length < 80 && isTitleLine(segment));
+  if (!line) return {};
+  // LinkedIn-style "Director of Business Development at Acme Financial Group"
+  const atSplit = line.split(/\s+at\s+/i);
+  if (atSplit.length === 2 && titleWordRegex.test(atSplit[0])) {
+    return { title: atSplit[0].trim(), companyHint: atSplit[1].trim(), titleSourceSegment: line };
+  }
+  return { title: line, titleSourceSegment: line };
 }
 
-function extractCompany(lines: string[], emails: string[], title?: string, fullName?: string): string | undefined {
-  const companyLine = lines.find((line) => line !== title && line !== fullName && isCompanyLine(line));
+function extractCompany(segments: string[], emails: string[], titleSourceSegment?: string, fullName?: string, companyHint?: string): string | undefined {
+  const companyLine = segments.find((segment) => segment !== titleSourceSegment && segment !== fullName && isCompanyLine(segment));
   if (companyLine) return companyLine;
+  if (companyHint) return companyHint;
   const domain = emails[0]?.split("@")[1]?.split(".")[0];
   if (domain && !disposableDomainWords.includes(domain)) return titleCase(domain.replace(/[-_]+/g, " "));
   return undefined;
 }
 
 function isTitleLine(line: string): boolean {
-  const lower = line.toLowerCase();
-  return titleWords.some((word) => lower.includes(word));
+  if (/\d{3,}/.test(line) || line.includes("@") || /https?:|www\./i.test(line)) return false;
+  return titleWordRegex.test(line);
 }
 
 function isCompanyLine(line: string): boolean {
-  const lower = line.toLowerCase();
-  return companySuffixes.some((suffix) => lower.split(/\s+/).includes(suffix)) || /©|copyright/i.test(line) === false && /\b[A-Z][A-Za-z]+(?:\s+[A-Z][A-Za-z&]+){0,4}\b/.test(line) && /labs|studio|group|systems|solutions/i.test(line);
+  if (line.length > 60 || line.includes("@") || /https?:|www\./i.test(line) || /©|copyright/i.test(line)) return false;
+  return companySuffixRegex.test(line);
 }
 
 function isDisclaimerLine(line: string): boolean {
   return /confidential|intended recipient|privileged|unsubscribe|legal notice|please consider the environment/i.test(line);
 }
 
-function buildNotes(lines: string[]): string | undefined {
-  const useful = lines.filter((line) => /assistant|calendar|timezone|pronouns|booking/i.test(line));
+function buildNotes(segments: string[]): string | undefined {
+  const useful = segments.filter((segment) => /assistant|calendar|timezone|pronouns|booking/i.test(segment));
   return useful.length ? useful.join("\n") : undefined;
 }
 
@@ -281,15 +367,9 @@ function phoneAggregateConfidence(phones: ParsedPhone[]): number {
   return round(phones.reduce((sum, phone) => sum + phone.confidence, 0) / phones.length);
 }
 
-function scorePhone(raw: string, type: PhoneType): number {
-  const digits = normalizePhone(raw);
-  const hasCountry = raw.trim().startsWith("+");
-  const plausibleLength = digits.length >= 10 && digits.length <= 15;
-  return round((plausibleLength ? 0.68 : 0.42) + (type === "unknown" ? 0 : 0.14) + (hasCountry ? 0.08 : 0));
-}
-
-function fullNameConfidence(fullName: string | undefined, emails: string[]): number {
+function fullNameConfidence(fullName: string | undefined, emails: string[], fromHeader: boolean): number {
   if (!fullName) return 0;
+  if (fromHeader) return 0.95;
   const emailLocal = emails[0]?.split("@")[0]?.replace(/[._-]+/g, " ").toLowerCase();
   const exactEmailHint = emailLocal && normalizeName(emailLocal) === normalizeName(fullName);
   return exactEmailHint ? 0.9 : 0.8;
@@ -302,7 +382,7 @@ function titleConfidence(title: string): number {
 function companyConfidence(company: string, emails: string[]): number {
   const domain = emails[0]?.split("@")[1]?.split(".")[0]?.replace(/[-_]+/g, " ");
   if (domain && normalizeName(company).includes(normalizeName(domain))) return 0.82;
-  return companySuffixes.some((suffix) => company.toLowerCase().includes(suffix.replace(".", ""))) ? 0.84 : 0.72;
+  return companySuffixRegex.test(company) ? 0.84 : 0.72;
 }
 
 function addressConfidence(address: ParsedAddress): number {
@@ -315,8 +395,8 @@ function addressConfidence(address: ParsedAddress): number {
   return round(score);
 }
 
-function inferCountry(lines: string[]): string | undefined {
-  return lines.find((line) => /United States|USA|Canada|United Kingdom|UK|Australia|Germany|France/i.test(line));
+function inferCountry(segments: string[]): string | undefined {
+  return segments.find((segment) => /^(United States|USA|Canada|United Kingdom|UK|Australia|Germany|France)$/i.test(segment));
 }
 
 function addEvidence(
@@ -365,10 +445,6 @@ function normalizePhone(value: string): string {
   return value.replace(/\D/g, "");
 }
 
-function normalizePhoneDisplayForSearch(value: string): string {
-  return normalizePhone(value);
-}
-
 function normalizeEmail(value: string): string {
   return value.trim().toLowerCase();
 }
@@ -390,5 +466,5 @@ function round(value: number): number {
 }
 
 export const internals = {
-  normalizePhone: normalizePhoneDisplayForSearch
+  normalizePhone
 };

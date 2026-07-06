@@ -1,5 +1,19 @@
 # ContactSnap AI — Code Audit & Recommendations
 
+## Implementation status (updated after remediation pass)
+
+Done in this branch:
+
+- **All P0 parser bugs (#1–#8)** — email-header pre-pass, pipe/bullet segment splitting, `libphonenumber-js` validation + formatting (kills account-number/invoice false positives and fixes mangled parens), alphabetic-TLD URL matching, end-of-line company-suffix matching (no more "capital"-substring companies), extended street types + postal-anchored city/state matching scoped after the street line, Unicode names with credential-suffix stripping, sign-off stoplist, weighted overall confidence (garbage now scores ~0), and removal of the parseContact/detectMultipleContacts mutual recursion. 10 new regression tests in `packages/parser/tests/real-world.test.ts`.
+- **`mergeContacts` clobber fix** — field-by-field merge; sparse re-parses no longer erase existing data.
+- **Web app** — phone fields editable, typed `updateContact`, localStorage persistence for history/settings/connections, auto-parse on paste, multi-contact picker buttons.
+- **Integrations** — `URL`-based redirect-URI validation (closes `localhost.evil.com` bypass), PKCE pair generation, authorization-code exchange + refresh for both providers, Graph search moved from unsupported `$search` to `$filter`, Google contact web-URL fix, duplicate email match now recommends "update". 15 new integration tests with mocked `fetch`.
+- **Tooling** — GitHub Actions CI (typecheck + tests across workspaces), root `test` script now runs all workspace tests, `VITE_OPENAI_API_KEY` removed from `.env.example`.
+
+Still open (requires OAuth app registrations / larger scope): wiring the web UI to the real OAuth flow and provider save calls, provider-side duplicate search on save, provider-side undo, desktop (Tauri) implementation, AI extraction layer, ESLint/Prettier.
+
+---
+
 Audit date: 2026-07-06. Scope: full repository (parser, web app, integrations, desktop shell, tooling). Method: code review of every source file, `npm run test` (11/11 pass), `npm run typecheck` (clean), plus a stress test of the parser against 10 realistic Copy2Contact-style inputs (email headers, pipe-separated signatures, LinkedIn copies, addresses, invoice text as a false-positive check).
 
 ## Verdict

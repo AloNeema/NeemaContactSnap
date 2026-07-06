@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
   AlertTriangle,
@@ -41,19 +41,55 @@ type Destination = "google" | "microsoft" | "both";
 type SaveMode = "create" | "update";
 type SaveState = "idle" | "parsing" | "saving";
 
+const storageKeys = {
+  history: "contactsnap.history",
+  privacy: "contactsnap.privacy",
+  connections: "contactsnap.connections"
+} as const;
+
+function loadStored<T>(key: string, fallback: T): T {
+  try {
+    const raw = window.localStorage.getItem(key);
+    return raw ? { ...fallback, ...JSON.parse(raw) } : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function loadStoredArray<T>(key: string): T[] {
+  try {
+    const raw = window.localStorage.getItem(key);
+    const parsed = raw ? JSON.parse(raw) : [];
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function persist(key: string, value: unknown) {
+  try {
+    window.localStorage.setItem(key, JSON.stringify(value));
+  } catch {
+    // Storage may be unavailable (private mode); the app still works in-memory.
+  }
+}
+
 function App() {
   const [theme, setTheme] = useState<"dark" | "light">("dark");
   const [sourceText, setSourceText] = useState(exampleText);
   const [contact, setContact] = useState<ParsedContact>(() => parseContact({ text: exampleText, source: "manual_paste" }));
-  const [history, setHistory] = useState<ImportLogEntry[]>([]);
-  const [privacy, setPrivacy] = useState<PrivacySettings>({
+  const [history, setHistory] = useState<ImportLogEntry[]>(() => loadStoredArray<ImportLogEntry>(storageKeys.history));
+  const [privacy, setPrivacy] = useState<PrivacySettings>(() => loadStored(storageKeys.privacy, {
     aiExtractionEnabled: false,
     askBeforeSendingToAi: true,
     clipboardMonitoringEnabled: false,
     localOnlyMode: true
-  });
-  const [googleConnected, setGoogleConnected] = useState(false);
-  const [microsoftConnected, setMicrosoftConnected] = useState(false);
+  }));
+  const [{ google: googleConnected, microsoft: microsoftConnected }, setConnections] = useState(() => loadStored(storageKeys.connections, { google: false, microsoft: false }));
+  const setGoogleConnected = (value: boolean | ((current: boolean) => boolean)) =>
+    setConnections((current) => ({ ...current, google: typeof value === "function" ? value(current.google) : value }));
+  const setMicrosoftConnected = (value: boolean | ((current: boolean) => boolean)) =>
+    setConnections((current) => ({ ...current, microsoft: typeof value === "function" ? value(current.microsoft) : value }));
   const [selectedView, setSelectedView] = useState<ViewName>("capture");
   const [destination, setDestination] = useState<Destination>("both");
   const [saveMode, setSaveMode] = useState<SaveMode>("create");
@@ -67,12 +103,16 @@ function App() {
   const multipleContacts = useMemo(() => detectMultipleContacts(sourceText), [sourceText]);
   const topDuplicate = duplicateMatches[0];
 
-  function runParse() {
+  useEffect(() => persist(storageKeys.history, history), [history]);
+  useEffect(() => persist(storageKeys.privacy, privacy), [privacy]);
+  useEffect(() => persist(storageKeys.connections, { google: googleConnected, microsoft: microsoftConnected }), [googleConnected, microsoftConnected]);
+
+  function parseText(text: string) {
     setStatus("parsing");
     setErrors([]);
     setNotice("");
     window.setTimeout(() => {
-      const parsed = parseContact({ text: sourceText, source: "manual_paste" });
+      const parsed = parseContact({ text, source: "manual_paste" });
       setContact(parsed);
       setSelectedEvidence(Object.keys(parsed.fieldEvidence)[0] ?? "emails");
       setSaveMode("create");
@@ -83,8 +123,19 @@ function App() {
     }, 120);
   }
 
-  function updateContact(field: keyof ParsedContact, value: any) {
+  function runParse() {
+    parseText(sourceText);
+  }
+
+  function updateContact<K extends keyof ParsedContact>(field: K, value: ParsedContact[K]) {
     setContact((current) => ({ ...current, [field]: value }));
+  }
+
+  function selectDetectedContact(detected: ParsedContact) {
+    setContact(detected);
+    setSelectedEvidence(Object.keys(detected.fieldEvidence)[0] ?? "emails");
+    setSaveMode("create");
+    setNotice(`Reviewing ${detected.fullName ?? detected.emails[0] ?? "selected contact"}. Save, then pick the next person.`);
   }
 
   function destinationProviders(value: Destination): IntegrationProvider[] {
@@ -194,8 +245,10 @@ function App() {
             contact={contact}
             updateContact={updateContact}
             runParse={runParse}
+            parseText={parseText}
             duplicateMatches={duplicateMatches}
             multipleContacts={multipleContacts}
+            selectDetectedContact={selectDetectedContact}
             destination={destination}
             setDestination={setDestination}
             saveMode={saveMode}
@@ -227,10 +280,12 @@ function CaptureView(props: {
   sourceText: string;
   setSourceText: (value: string) => void;
   contact: ParsedContact;
-  updateContact: (field: keyof ParsedContact, value: any) => void;
+  updateContact: <K extends keyof ParsedContact>(field: K, value: ParsedContact[K]) => void;
   runParse: () => void;
+  parseText: (text: string) => void;
   duplicateMatches: DuplicateMatch[];
   multipleContacts: ParsedContact[];
+  selectDetectedContact: (contact: ParsedContact) => void;
   destination: Destination;
   setDestination: (value: Destination) => void;
   saveMode: SaveMode;
@@ -245,6 +300,20 @@ function CaptureView(props: {
   const selected = contact.fieldEvidence[props.selectedEvidence];
   const hasExtractedFields = Object.keys(contact.fieldEvidence).length > 0;
 
+  function updatePhone(type: "mobile" | "office", value: string) {
+    const phones = contact.phones.filter((phone) => phone.type !== type);
+    if (value.trim()) {
+      phones.push({ type, value: value.trim(), confidence: 1, evidence: "Edited by you" });
+    }
+    props.updateContact("phones", phones);
+  }
+
+  function handlePaste(event: React.ClipboardEvent<HTMLTextAreaElement>) {
+    const target = event.currentTarget;
+    // Parse after the paste lands in the textarea so the new value is used.
+    window.setTimeout(() => props.parseText(target.value), 0);
+  }
+
   return (
     <div className="capture-grid production">
       <section className="input-panel">
@@ -255,14 +324,21 @@ function CaptureView(props: {
           </Button>
         </div>
         <SourcePreview text={props.sourceText} activeLine={selected?.sourceLine} />
-        <Textarea value={props.sourceText} onChange={(event) => props.setSourceText(event.target.value)} rows={8} />
+        <Textarea value={props.sourceText} onChange={(event) => props.setSourceText(event.target.value)} onPaste={handlePaste} rows={8} />
         {!props.sourceText.trim() ? (
           <div className="empty compact">Paste an email signature, business card OCR, or profile block to start extraction.</div>
         ) : null}
         {props.multipleContacts.length > 1 ? (
           <div className="notice warn">
             <strong>{props.multipleContacts.length} people found</strong>
-            <span>{props.multipleContacts.map((item) => item.fullName ?? item.emails[0]).join(" · ")}</span>
+            <span>Pick one to review and save, then come back for the next.</span>
+            <div className="segmented">
+              {props.multipleContacts.map((item, index) => (
+                <button key={item.emails[0] ?? index} onClick={() => props.selectDetectedContact(item)}>
+                  {item.fullName ?? item.emails[0] ?? `Contact ${index + 1}`}
+                </button>
+              ))}
+            </div>
           </div>
         ) : null}
       </section>
@@ -284,8 +360,8 @@ function CaptureView(props: {
           <Field label="Title"><Input value={contact.title ?? ""} onFocus={() => props.setSelectedEvidence("title")} onChange={(event) => props.updateContact("title", event.target.value)} /></Field>
           <Field label="Company"><Input value={contact.company ?? ""} onFocus={() => props.setSelectedEvidence("company")} onChange={(event) => props.updateContact("company", event.target.value)} /></Field>
           <Field label="Email"><Input value={contact.emails[0] ?? ""} onFocus={() => props.setSelectedEvidence("emails")} onChange={(event) => props.updateContact("emails", event.target.value ? [event.target.value] : [])} /></Field>
-          <Field label="Mobile"><Input value={contact.phones.find((phone) => phone.type === "mobile")?.value ?? ""} onFocus={() => props.setSelectedEvidence("phones")} readOnly /></Field>
-          <Field label="Office"><Input value={contact.phones.find((phone) => phone.type === "office")?.value ?? ""} onFocus={() => props.setSelectedEvidence("phones")} readOnly /></Field>
+          <Field label="Mobile"><Input value={contact.phones.find((phone) => phone.type === "mobile")?.value ?? ""} onFocus={() => props.setSelectedEvidence("phones")} onChange={(event) => updatePhone("mobile", event.target.value)} /></Field>
+          <Field label="Office"><Input value={contact.phones.find((phone) => phone.type === "office")?.value ?? ""} onFocus={() => props.setSelectedEvidence("phones")} onChange={(event) => updatePhone("office", event.target.value)} /></Field>
           <Field label="Website"><Input value={contact.website ?? ""} onFocus={() => props.setSelectedEvidence("website")} onChange={(event) => props.updateContact("website", event.target.value)} /></Field>
           <Field label="LinkedIn"><Input value={contact.linkedinUrl ?? ""} onFocus={() => props.setSelectedEvidence("linkedinUrl")} onChange={(event) => props.updateContact("linkedinUrl", event.target.value)} /></Field>
         </div>
@@ -455,10 +531,28 @@ function Connection({ label, connected, onClick }: { label: string; connected: b
   );
 }
 
+// Merge field by field: a sparse new parse must never erase data already on
+// the existing contact (ParsedContact materializes every key, so a plain
+// spread would overwrite populated fields with undefined).
 function mergeContacts(existing: ParsedContact, incoming: ParsedContact): ParsedContact {
   return {
     ...existing,
-    ...incoming,
+    fullName: incoming.fullName ?? existing.fullName,
+    firstName: incoming.firstName ?? existing.firstName,
+    lastName: incoming.lastName ?? existing.lastName,
+    title: incoming.title ?? existing.title,
+    company: incoming.company ?? existing.company,
+    website: incoming.website ?? existing.website,
+    linkedinUrl: incoming.linkedinUrl ?? existing.linkedinUrl,
+    address: incoming.address ?? existing.address,
+    notes: incoming.notes ?? existing.notes,
+    sourceText: incoming.sourceText,
+    source: incoming.source ?? existing.source,
+    sourceEmailDomain: incoming.sourceEmailDomain ?? existing.sourceEmailDomain,
+    dateCaptured: incoming.dateCaptured,
+    confidence: incoming.confidence,
+    fieldConfidence: incoming.fieldConfidence,
+    fieldEvidence: incoming.fieldEvidence,
     emails: Array.from(new Set([...existing.emails, ...incoming.emails])),
     phones: [...existing.phones, ...incoming.phones].filter((phone, index, phones) => phones.findIndex((item) => item.value === phone.value) === index),
     warnings: incoming.warnings

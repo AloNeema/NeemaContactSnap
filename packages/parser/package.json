@@ -11,7 +11,8 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@contactsnap/shared-types": "0.1.0"
+    "@contactsnap/shared-types": "0.1.0",
+    "libphonenumber-js": "^1.13.8"
   },
   "devDependencies": {
     "vitest": "^3.2.0"

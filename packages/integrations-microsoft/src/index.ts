@@ -16,9 +16,40 @@ export type MicrosoftContactSearchResult = {
   emailAddresses?: string[];
 };
 
+// Parse the URI instead of prefix-matching so hosts like
+// "localhost.evil.com" cannot pass as localhost.
+export function isSafeRedirectUri(redirectUri: string): boolean {
+  try {
+    const url = new URL(redirectUri);
+    if (url.protocol === "https:") return true;
+    return url.protocol === "http:" && (url.hostname === "localhost" || url.hostname === "127.0.0.1");
+  } catch {
+    return false;
+  }
+}
+
+export type PkcePair = {
+  codeVerifier: string;
+  codeChallenge: string;
+};
+
+export async function createPkcePair(): Promise<PkcePair> {
+  const bytes = new Uint8Array(32);
+  crypto.getRandomValues(bytes);
+  const codeVerifier = base64UrlEncode(bytes);
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(codeVerifier));
+  return { codeVerifier, codeChallenge: base64UrlEncode(new Uint8Array(digest)) };
+}
+
+function base64UrlEncode(bytes: Uint8Array): string {
+  let binary = "";
+  bytes.forEach((byte) => { binary += String.fromCharCode(byte); });
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
 export function buildMicrosoftAuthUrl(config: MicrosoftContactsConfig, state: string): string {
   if (!state || state.length < 16) throw new Error("Microsoft OAuth state must be an unpredictable value of at least 16 characters.");
-  if (!/^https?:\/\/localhost|^http:\/\/127\.0\.0\.1|^https:\/\//.test(config.redirectUri)) {
+  if (!isSafeRedirectUri(config.redirectUri)) {
     throw new Error("Microsoft redirect URI must use localhost during development or HTTPS in production.");
   }
   const tenant = config.tenantId ?? "common";
@@ -37,20 +68,91 @@ export function buildMicrosoftAuthUrl(config: MicrosoftContactsConfig, state: st
   return `https://login.microsoftonline.com/${tenant}/oauth2/v2.0/authorize?${params.toString()}`;
 }
 
+export type MicrosoftTokenResponse = {
+  accessToken: string;
+  refreshToken?: string;
+  expiresIn: number;
+  scope?: string;
+};
+
+// Exchange the authorization code for tokens (auth-code + PKCE public client).
+export async function exchangeMicrosoftCode(options: {
+  clientId: string;
+  redirectUri: string;
+  code: string;
+  codeVerifier: string;
+  tenantId?: string;
+}): Promise<MicrosoftTokenResponse> {
+  const tenant = options.tenantId ?? "common";
+  const body = new URLSearchParams({
+    client_id: options.clientId,
+    redirect_uri: options.redirectUri,
+    code: options.code,
+    code_verifier: options.codeVerifier,
+    grant_type: "authorization_code",
+    scope: scopes.join(" ")
+  });
+  const response = await fetch(`https://login.microsoftonline.com/${tenant}/oauth2/v2.0/token`, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: body.toString()
+  });
+  await assertOk(response, "exchange Microsoft authorization code");
+  const payload = await response.json();
+  return {
+    accessToken: payload.access_token,
+    refreshToken: payload.refresh_token,
+    expiresIn: payload.expires_in,
+    scope: payload.scope
+  };
+}
+
+export async function refreshMicrosoftToken(options: {
+  clientId: string;
+  refreshToken: string;
+  tenantId?: string;
+}): Promise<MicrosoftTokenResponse> {
+  const tenant = options.tenantId ?? "common";
+  const body = new URLSearchParams({
+    client_id: options.clientId,
+    refresh_token: options.refreshToken,
+    grant_type: "refresh_token",
+    scope: scopes.join(" ")
+  });
+  const response = await fetch(`https://login.microsoftonline.com/${tenant}/oauth2/v2.0/token`, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: body.toString()
+  });
+  await assertOk(response, "refresh Microsoft access token");
+  const payload = await response.json();
+  return {
+    accessToken: payload.access_token,
+    refreshToken: payload.refresh_token ?? options.refreshToken,
+    expiresIn: payload.expires_in,
+    scope: payload.scope
+  };
+}
+
 export function assertMicrosoftTokenSafeForStorage(token: string): void {
   if (!token || token.length < 20) throw new Error("Microsoft token is empty or malformed.");
   if (token.includes(" ")) throw new Error("Microsoft token must be stored as an opaque secret without logging or splitting.");
 }
 
+// Graph's personal-contacts endpoint does not support $search — filter on an
+// exact email match when the query looks like one, otherwise on display name.
 export async function searchMicrosoftContacts(accessToken: string, query: string): Promise<MicrosoftContactSearchResult[]> {
+  const escaped = query.replace(/'/g, "''");
+  const filter = query.includes("@")
+    ? `emailAddresses/any(a:a/address eq '${escaped}')`
+    : `startswith(displayName, '${escaped}')`;
   const params = new URLSearchParams({
-    "$search": `"${query.replace(/"/g, "")}"`,
+    "$filter": filter,
     "$top": "10"
   });
   const response = await fetch(`${graphBaseUrl}/me/contacts?${params.toString()}`, {
     headers: {
-      Authorization: `Bearer ${accessToken}`,
-      ConsistencyLevel: "eventual"
+      Authorization: `Bearer ${accessToken}`
     }
   });
   await assertOk(response, "search Microsoft contacts");
