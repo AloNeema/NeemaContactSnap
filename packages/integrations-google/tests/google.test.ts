@@ -4,7 +4,9 @@ import {
   buildGoogleAuthUrl,
   createGoogleContact,
   createPkcePair,
+  deleteGoogleContact,
   exchangeGoogleCode,
+  getGoogleContactEtag,
   isSafeRedirectUri,
   searchGoogleContacts
 } from "../src/index";
@@ -62,6 +64,13 @@ describe("buildGoogleAuthUrl", () => {
     const url = new URL(buildGoogleAuthUrl({ clientId: "id", redirectUri: "https://x.com/cb", codeChallenge: "challenge" }, "0123456789abcdef"));
     expect(url.searchParams.get("code_challenge")).toBe("challenge");
     expect(url.searchParams.get("code_challenge_method")).toBe("S256");
+    expect(url.searchParams.get("access_type")).toBe("offline");
+  });
+
+  it("supports the implicit token flow for browser-only apps", () => {
+    const url = new URL(buildGoogleAuthUrl({ clientId: "id", redirectUri: "https://x.com/cb", responseType: "token" }, "0123456789abcdef"));
+    expect(url.searchParams.get("response_type")).toBe("token");
+    expect(url.searchParams.get("access_type")).toBeNull();
   });
 });
 
@@ -99,6 +108,30 @@ describe("createGoogleContact", () => {
   it("throws with status detail on failure", async () => {
     mockFetchOnce({ error: "denied" }, false, 403);
     await expect(createGoogleContact("token", contact)).rejects.toThrow(/403/);
+  });
+});
+
+describe("getGoogleContactEtag", () => {
+  it("returns the etag from the person resource", async () => {
+    const spy = mockFetchOnce({ etag: "abc123", resourceName: "people/c1" });
+    await expect(getGoogleContactEtag("token", "people/c1")).resolves.toBe("abc123");
+    const [url] = spy.mock.calls[0] as unknown as [string];
+    expect(url).toContain("people/c1?personFields=");
+  });
+
+  it("throws when no etag is present", async () => {
+    mockFetchOnce({ resourceName: "people/c1" });
+    await expect(getGoogleContactEtag("token", "people/c1")).rejects.toThrow(/etag/);
+  });
+});
+
+describe("deleteGoogleContact", () => {
+  it("calls the deleteContact endpoint", async () => {
+    const spy = mockFetchOnce({});
+    await deleteGoogleContact("token", "people/c1");
+    const [url, init] = spy.mock.calls[0] as unknown as [string, RequestInit];
+    expect(url).toContain("people/c1:deleteContact");
+    expect(init.method).toBe("DELETE");
   });
 });
 

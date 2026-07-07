@@ -590,3 +590,9 @@ h2 {
     justify-items: start;
   }
 }
+
+.save-hint {
+  opacity: 0.55;
+  font-size: 11px;
+  align-self: center;
+}

@@ -7,6 +7,10 @@ export type GoogleContactsConfig = {
   clientId: string;
   redirectUri: string;
   codeChallenge?: string;
+  // "token" (implicit flow) lets a pure browser app obtain an access token
+  // without a client secret; "code" (default) is for PKCE/desktop or
+  // server-assisted exchange.
+  responseType?: "code" | "token";
 };
 
 export type GoogleContactSearchResult = {
@@ -51,15 +55,18 @@ export function buildGoogleAuthUrl(config: GoogleContactsConfig, state: string):
   if (!isSafeRedirectUri(config.redirectUri)) {
     throw new Error("Google redirect URI must use localhost during development or HTTPS in production.");
   }
+  const responseType = config.responseType ?? "code";
   const params = new URLSearchParams({
     client_id: config.clientId,
     redirect_uri: config.redirectUri,
-    response_type: "code",
+    response_type: responseType,
     scope: scopes.join(" "),
-    access_type: "offline",
     prompt: "consent",
     state
   });
+  if (responseType === "code") {
+    params.set("access_type", "offline");
+  }
   if (config.codeChallenge) {
     params.set("code_challenge", config.codeChallenge);
     params.set("code_challenge_method", "S256");
@@ -173,6 +180,26 @@ export async function createGoogleContact(accessToken: string, contact: ParsedCo
     url: payload.resourceName ? `https://contacts.google.com/person/${encodeURIComponent(String(payload.resourceName).replace(/^people\//, ""))}` : undefined,
     created: true
   };
+}
+
+// Fetch the current etag for a person; the People API requires it on updates
+// to guard against clobbering concurrent edits.
+export async function getGoogleContactEtag(accessToken: string, resourceName: string): Promise<string> {
+  const response = await fetch(`${peopleBaseUrl}/${resourceName}?personFields=names`, {
+    headers: { Authorization: `Bearer ${accessToken}` }
+  });
+  await assertOk(response, "fetch Google contact etag");
+  const payload = await response.json();
+  if (!payload.etag) throw new Error("Google contact response did not include an etag.");
+  return payload.etag;
+}
+
+export async function deleteGoogleContact(accessToken: string, resourceName: string): Promise<void> {
+  const response = await fetch(`${peopleBaseUrl}/${resourceName}:deleteContact`, {
+    method: "DELETE",
+    headers: { Authorization: `Bearer ${accessToken}` }
+  });
+  await assertOk(response, "delete Google contact");
 }
 
 export async function updateGoogleContact(accessToken: string, resourceName: string, etag: string, contact: ParsedContact): Promise<SaveContactResult> {
