@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseContact } from "../src/index";
+import { findDuplicateContacts, parseContact, personNamesMatch } from "../src/index";
 
 describe("real-world formats", () => {
   it("extracts the display name and email from a From: header", () => {
@@ -117,5 +117,78 @@ mike@bluerock.com`
       text: "Please review the working capital application we discussed.\njordan@example.com"
     });
     expect(contact.company).not.toContain("working capital");
+  });
+
+  it("prefers the original sender in a forwarded email", () => {
+    const contact = parseContact({
+      text: `From: Nick Neema <nick@quick-capitalfunding.com>
+To: Team
+
+FYI, good lead below.
+
+---------- Forwarded message ---------
+From: Dana White <dana@fundco.com>
+Date: Mon, Jul 6, 2026 at 8:12 AM
+Subject: Working capital inquiry
+To: nick@quick-capitalfunding.com`
+    });
+    expect(contact.fullName).toBe("Dana White");
+    expect(contact.emails[0]).toBe("dana@fundco.com");
+  });
+
+  it("ignores quoted reply lines and 'On ... wrote:' attributions", () => {
+    const contact = parseContact({
+      text: `Sounds good, see you then.
+
+Priya Shah
+Director of Partnerships
+priya@orbitgroup.com
+
+On Mon Jul 6 2026 Leo Martin <leo@orbitgroup.com> wrote:
+> Leo Martin
+> Head of Product`
+    });
+    expect(contact.fullName).toBe("Priya Shah");
+    expect(contact.title).toBe("Director of Partnerships");
+  });
+
+  it("normalizes ALL-CAPS names", () => {
+    const contact = parseContact({
+      text: `JOHN SMITH
+CEO
+john.smith@acme-funding.com`
+    });
+    expect(contact.fullName).toBe("John Smith");
+  });
+});
+
+describe("personNamesMatch", () => {
+  it("matches nicknames with the same last name", () => {
+    expect(personNamesMatch("Bob Smith", "Robert Smith")).toBe(true);
+    expect(personNamesMatch("Mike Johnson", "Michael Johnson")).toBe(true);
+    expect(personNamesMatch("Nick Neema", "Nicholas Neema")).toBe(true);
+  });
+
+  it("tolerates a single typo in long names but not short ones", () => {
+    expect(personNamesMatch("Jordan Smith", "Jordon Smith")).toBe(true);
+    expect(personNamesMatch("Dan Brown", "Don Brown")).toBe(false);
+  });
+
+  it("matches a first initial against a full first name", () => {
+    expect(personNamesMatch("J Smith", "Jordan Smith")).toBe(true);
+  });
+
+  it("rejects different people", () => {
+    expect(personNamesMatch("Bob Smith", "Robert Jones")).toBe(false);
+    expect(personNamesMatch("Jane Doe", "Joan Roe")).toBe(false);
+  });
+
+  it("feeds duplicate detection", () => {
+    const candidate = parseContact({ text: "Bob Smith\nAcme Capital\nbob@acmecap.com\n(415) 555-0100" });
+    const matches = findDuplicateContacts(candidate, [
+      parseContact({ text: "Robert Smith\nAcme Capital\nrobert.smith@acmecap.com\n(415) 555-0100" })
+    ]);
+    expect(matches.length).toBeGreaterThan(0);
+    expect(matches[0].reasons).toContain("matching name");
   });
 });

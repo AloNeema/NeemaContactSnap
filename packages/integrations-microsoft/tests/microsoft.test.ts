@@ -3,6 +3,7 @@ import type { ParsedContact } from "@contactsnap/shared-types";
 import {
   buildMicrosoftAuthUrl,
   createMicrosoftContact,
+  deleteMicrosoftContact,
   exchangeMicrosoftCode,
   isSafeRedirectUri,
   searchMicrosoftContacts
@@ -84,6 +85,16 @@ describe("exchangeMicrosoftCode", () => {
     const body = new URLSearchParams(String(init.body));
     expect(body.get("code_verifier")).toBe("verifier");
     expect(body.get("grant_type")).toBe("authorization_code");
+  });
+});
+
+describe("deleteMicrosoftContact", () => {
+  it("issues a DELETE for the contact id", async () => {
+    const spy = mockFetchOnce({});
+    await deleteMicrosoftContact("token", "abc");
+    const [url, init] = spy.mock.calls[0] as unknown as [string, RequestInit];
+    expect(url).toBe("https://graph.microsoft.com/v1.0/me/contacts/abc");
+    expect(init.method).toBe("DELETE");
   });
 });
 

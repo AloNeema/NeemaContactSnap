@@ -23,6 +23,15 @@ import {
 import { detectMultipleContacts, findDuplicateContacts, parseContact } from "@contactsnap/parser";
 import type { DuplicateMatch, ImportLogEntry, IntegrationProvider, ParsedContact, PrivacySettings, ProviderSaveError } from "@contactsnap/shared-types";
 import { Button, Field, Input, Meter, StatusPill, Textarea } from "@contactsnap/ui";
+import {
+  completeOAuthCallback,
+  disconnectProvider,
+  isProviderConfigured,
+  isProviderConnected,
+  startOAuth,
+  type OAuthProvider
+} from "./oauth";
+import { deleteProviderContact, saveContactToProvider } from "./providers";
 import "./styles.css";
 
 const exampleText = `Mina Chen
@@ -85,11 +94,14 @@ function App() {
     clipboardMonitoringEnabled: false,
     localOnlyMode: true
   }));
-  const [{ google: googleConnected, microsoft: microsoftConnected }, setConnections] = useState(() => loadStored(storageKeys.connections, { google: false, microsoft: false }));
-  const setGoogleConnected = (value: boolean | ((current: boolean) => boolean)) =>
-    setConnections((current) => ({ ...current, google: typeof value === "function" ? value(current.google) : value }));
-  const setMicrosoftConnected = (value: boolean | ((current: boolean) => boolean)) =>
-    setConnections((current) => ({ ...current, microsoft: typeof value === "function" ? value(current.microsoft) : value }));
+  const [{ google: googleConnected, microsoft: microsoftConnected }, setConnections] = useState(() => {
+    const stored = loadStored(storageKeys.connections, { google: false, microsoft: false });
+    // Real tokens outrank the stored demo flag.
+    return {
+      google: stored.google || isProviderConnected("google"),
+      microsoft: stored.microsoft || isProviderConnected("microsoft")
+    };
+  });
   const [selectedView, setSelectedView] = useState<ViewName>("capture");
   const [destination, setDestination] = useState<Destination>("both");
   const [saveMode, setSaveMode] = useState<SaveMode>("create");
@@ -106,6 +118,47 @@ function App() {
   useEffect(() => persist(storageKeys.history, history), [history]);
   useEffect(() => persist(storageKeys.privacy, privacy), [privacy]);
   useEffect(() => persist(storageKeys.connections, { google: googleConnected, microsoft: microsoftConnected }), [googleConnected, microsoftConnected]);
+
+  // Finish an OAuth redirect if this page load is one.
+  useEffect(() => {
+    completeOAuthCallback()
+      .then((provider) => {
+        if (!provider) return;
+        setConnections((current) => ({ ...current, [provider]: true }));
+        setNotice(`${provider === "google" ? "Google Contacts" : "Outlook Contacts"} connected. Saves now go to the real account.`);
+      })
+      .catch((error) => setNotice(error instanceof Error ? error.message : String(error)));
+  }, []);
+
+  // Keyboard-first flow: Ctrl/Cmd+Enter saves the reviewed contact.
+  useEffect(() => {
+    function onKeyDown(event: KeyboardEvent) {
+      if ((event.ctrlKey || event.metaKey) && event.key === "Enter" && selectedView === "capture" && status === "idle" && contact.emails.length) {
+        event.preventDefault();
+        void saveContact();
+      }
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  });
+
+  async function toggleConnection(provider: OAuthProvider, next: boolean) {
+    if (!next) {
+      disconnectProvider(provider);
+      setConnections((current) => ({ ...current, [provider]: false }));
+      return;
+    }
+    if (isProviderConfigured(provider)) {
+      try {
+        await startOAuth(provider); // navigates away to the consent screen
+      } catch (error) {
+        setNotice(error instanceof Error ? error.message : String(error));
+      }
+      return;
+    }
+    setConnections((current) => ({ ...current, [provider]: true }));
+    setNotice(`${provider === "google" ? "Google" : "Outlook"} is in demo mode — saves are logged locally only. Add VITE_${provider === "google" ? "GOOGLE" : "MICROSOFT"}_CLIENT_ID to .env.local to connect the real account.`);
+  }
 
   function parseText(text: string) {
     setStatus("parsing");
@@ -165,7 +218,7 @@ function App() {
     return providerErrors;
   }
 
-  function saveContact() {
+  async function saveContact() {
     const providers = destinationProviders(destination);
     const readinessErrors = validateProviderReadiness(providers);
     setErrors(readinessErrors);
@@ -173,31 +226,76 @@ function App() {
     if (readinessErrors.length) return;
 
     setStatus("saving");
-    window.setTimeout(() => {
-      const mergedContact = saveMode === "update" && topDuplicate ? mergeContacts(topDuplicate.contact, contact) : contact;
-      const entry: ImportLogEntry = {
-        id: crypto.randomUUID(),
-        contact: mergedContact,
-        source: contact.source ?? "manual_paste",
-        savedTo: providers,
-        action: saveMode === "update" ? "updated" : "created",
-        providerIds: Object.fromEntries(providers.map((provider) => [provider, `${provider}_${Date.now()}`])),
-        createdAt: new Date().toISOString(),
-        undoAvailable: true
-      };
-      setHistory((current) => [entry, ...current]);
-      setStatus("idle");
-      setSelectedView("history");
-      setNotice(saveMode === "update" ? "Existing contact update queued in the import log." : "Contact creation queued in the import log.");
-    }, 450);
+    const mergedContact = saveMode === "update" && topDuplicate ? mergeContacts(topDuplicate.contact, contact) : contact;
+    const providerIds: Partial<Record<IntegrationProvider, string>> = {};
+    const saveErrors: ProviderSaveError[] = [];
+    let liveSaves = 0;
+
+    for (const provider of providers) {
+      if (provider === "crm") continue;
+      const live = isProviderConfigured(provider) && isProviderConnected(provider);
+      if (!live) {
+        // Demo mode: no real account behind this provider — log locally only.
+        providerIds[provider] = `sim:${provider}:${crypto.randomUUID()}`;
+        continue;
+      }
+      const outcome = await saveContactToProvider(provider, mergedContact, saveMode);
+      if (outcome.ok) {
+        providerIds[provider] = outcome.result.id;
+        liveSaves += 1;
+      } else {
+        saveErrors.push(outcome.error);
+      }
+    }
+
+    setStatus("idle");
+    setErrors(saveErrors);
+    const savedProviders = providers.filter((provider) => providerIds[provider]);
+    if (!savedProviders.length) return;
+
+    const entry: ImportLogEntry = {
+      id: crypto.randomUUID(),
+      contact: mergedContact,
+      source: contact.source ?? "manual_paste",
+      savedTo: savedProviders,
+      action: saveMode === "update" ? "updated" : "created",
+      providerIds,
+      createdAt: new Date().toISOString(),
+      undoAvailable: true
+    };
+    setHistory((current) => [entry, ...current]);
+    setSelectedView("history");
+    if (liveSaves) {
+      setNotice(`${saveMode === "update" ? "Updated" : "Saved"} in ${savedProviders.join(" + ")}.`);
+    } else {
+      setNotice("Demo mode: logged locally only. Connect a real account in Settings to save to Google or Outlook.");
+    }
   }
 
-  function undoLast() {
-    setHistory((current) => {
-      const index = current.findIndex((entry) => entry.undoAvailable && !entry.undoneAt);
-      if (index < 0) return current;
-      return current.map((entry, entryIndex) => entryIndex === index ? { ...entry, undoneAt: new Date().toISOString(), undoAvailable: false } : entry);
-    });
+  async function undoLast() {
+    const entry = history.find((item) => item.undoAvailable && !item.undoneAt);
+    if (!entry) return;
+
+    // Undo a real create by deleting the provider-side contact. Updates are
+    // only undone locally — we do not attempt to restore prior field values.
+    const failures: ProviderSaveError[] = [];
+    if (entry.action === "created") {
+      for (const [provider, id] of Object.entries(entry.providerIds)) {
+        if (!id || id.startsWith("sim:") || provider === "crm") continue;
+        const outcome = await deleteProviderContact(provider as OAuthProvider, id);
+        if (!outcome.ok) failures.push(outcome.error);
+      }
+    }
+    if (failures.length) {
+      setErrors(failures);
+      setNotice("Undo could not remove the contact from every provider. Fix the errors and try again.");
+      return;
+    }
+    setErrors([]);
+    setHistory((current) => current.map((item) => item.id === entry.id ? { ...item, undoneAt: new Date().toISOString(), undoAvailable: false } : item));
+    setNotice(entry.action === "updated"
+      ? "Import log entry undone locally. Field changes already applied at the provider are not reverted."
+      : "Last import undone.");
   }
 
   return (
@@ -216,8 +314,8 @@ function App() {
           <button className={selectedView === "settings" ? "active" : ""} onClick={() => setSelectedView("settings")}><Shield size={18} />Settings</button>
         </nav>
         <div className="connection-stack">
-          <Connection label="Google" connected={googleConnected} onClick={() => setGoogleConnected((value) => !value)} />
-          <Connection label="Outlook" connected={microsoftConnected} onClick={() => setMicrosoftConnected((value) => !value)} />
+          <Connection label="Google" connected={googleConnected} onClick={() => void toggleConnection("google", !googleConnected)} />
+          <Connection label="Outlook" connected={microsoftConnected} onClick={() => void toggleConnection("microsoft", !microsoftConnected)} />
         </div>
         <Button icon={theme === "dark" ? <Sun size={16} /> : <Moon size={16} />} onClick={() => setTheme(theme === "dark" ? "light" : "dark")}>
           {theme === "dark" ? "Light" : "Dark"}
@@ -267,8 +365,7 @@ function App() {
             setPrivacy={setPrivacy}
             googleConnected={googleConnected}
             microsoftConnected={microsoftConnected}
-            setGoogleConnected={setGoogleConnected}
-            setMicrosoftConnected={setMicrosoftConnected}
+            toggleConnection={toggleConnection}
           />
         ) : null}
       </section>
@@ -290,7 +387,7 @@ function CaptureView(props: {
   setDestination: (value: Destination) => void;
   saveMode: SaveMode;
   setSaveMode: (value: SaveMode) => void;
-  saveContact: () => void;
+  saveContact: () => Promise<void>;
   selectedEvidence: string;
   setSelectedEvidence: (value: string) => void;
   status: SaveState;
@@ -397,6 +494,7 @@ function CaptureView(props: {
           <Button icon={<Save size={16} />} tone="primary" onClick={props.saveContact} disabled={props.status !== "idle" || !contact.emails.length}>
             {props.status === "saving" ? "Saving..." : props.saveMode === "update" ? "Update Contact" : "Save Contact"}
           </Button>
+          <small className="save-hint">Ctrl+Enter</small>
         </div>
       </section>
     </div>
@@ -494,8 +592,7 @@ function SettingsView(props: {
   setPrivacy: React.Dispatch<React.SetStateAction<PrivacySettings>>;
   googleConnected: boolean;
   microsoftConnected: boolean;
-  setGoogleConnected: React.Dispatch<React.SetStateAction<boolean>>;
-  setMicrosoftConnected: React.Dispatch<React.SetStateAction<boolean>>;
+  toggleConnection: (provider: OAuthProvider, next: boolean) => Promise<void>;
 }) {
   return (
     <section className="settings-view">
@@ -504,8 +601,8 @@ function SettingsView(props: {
         <ToggleCard icon={<Shield />} title="Ask before AI" detail="Require review before text leaves this device." checked={props.privacy.askBeforeSendingToAi} onChange={(checked) => props.setPrivacy((value) => ({ ...value, askBeforeSendingToAi: checked }))} />
         <ToggleCard icon={<Clipboard />} title="Clipboard monitor" detail="Read clipboard only after permission and a hotkey action." checked={props.privacy.clipboardMonitoringEnabled} onChange={(checked) => props.setPrivacy((value) => ({ ...value, clipboardMonitoringEnabled: checked }))} />
         <ToggleCard icon={<KeyRound />} title="Local-only mode" detail="Use deterministic parsing and keep raw source local." checked={props.privacy.localOnlyMode} onChange={(checked) => props.setPrivacy((value) => ({ ...value, localOnlyMode: checked, aiExtractionEnabled: !checked }))} />
-        <ToggleCard icon={<Cloud />} title="Google Contacts" detail="Uses OAuth with contacts.readwrite scope." checked={props.googleConnected} onChange={props.setGoogleConnected} />
-        <ToggleCard icon={<Cloud />} title="Outlook Contacts" detail="Uses Microsoft Graph Contacts.ReadWrite." checked={props.microsoftConnected} onChange={props.setMicrosoftConnected} />
+        <ToggleCard icon={<Cloud />} title="Google Contacts" detail="Uses OAuth with the Google Contacts scope." checked={props.googleConnected} onChange={(checked) => void props.toggleConnection("google", checked)} />
+        <ToggleCard icon={<Cloud />} title="Outlook Contacts" detail="Uses Microsoft Graph Contacts.ReadWrite." checked={props.microsoftConnected} onChange={(checked) => void props.toggleConnection("microsoft", checked)} />
       </div>
     </section>
   );

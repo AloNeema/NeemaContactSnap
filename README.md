@@ -34,6 +34,19 @@ npm run dev
 
 Create `.env.local` from `.env.example` and add OAuth client IDs before connecting real Google or Microsoft accounts. The app remains usable in local-only parser mode without AI or OAuth credentials.
 
+## Connecting real accounts
+
+Without client IDs the app runs in **demo mode**: saves are logged to local history only. To save to real address books:
+
+- **Microsoft / Outlook** (recommended first): in [Microsoft Entra admin center](https://entra.microsoft.com) register an app, add a **Single-page application** redirect URI of `http://localhost:5173/oauth/microsoft/callback`, grant delegated `Contacts.ReadWrite` + `offline_access`, and put the Application (client) ID in `VITE_MICROSOFT_CLIENT_ID`. Auth uses authorization code + PKCE with silent refresh.
+- **Google**: in [Google Cloud Console](https://console.cloud.google.com/apis/credentials) create an OAuth **Web application** client with an authorized redirect URI of `http://localhost:5173/oauth/google/callback`, enable the People API, and put the client ID in `VITE_GOOGLE_CLIENT_ID`. The browser app uses the implicit token flow (no client secret in the bundle); reconnect when the session expires.
+
+Once connected, Save Contact searches the real address book for duplicates by email, creates or updates through the provider API, records the real contact IDs in history, and Undo deletes a created contact provider-side.
+
+## Parser quality
+
+`npm run eval` scores the parser against the ground-truth corpus in `packages/parser/eval/corpus.ts` and prints per-field accuracy. CI enforces per-field accuracy floors (`packages/parser/tests/eval.test.ts`). When the parser gets a real signature wrong, add the (anonymized) sample to the corpus with the expected fields — that miss becomes a permanent regression test.
+
 ## Privacy Model
 
 - Local deterministic parsing is the default.

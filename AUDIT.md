@@ -10,7 +10,16 @@ Done in this branch:
 - **Integrations** — `URL`-based redirect-URI validation (closes `localhost.evil.com` bypass), PKCE pair generation, authorization-code exchange + refresh for both providers, Graph search moved from unsupported `$search` to `$filter`, Google contact web-URL fix, duplicate email match now recommends "update". 15 new integration tests with mocked `fetch`.
 - **Tooling** — GitHub Actions CI (typecheck + tests across workspaces), root `test` script now runs all workspace tests, `VITE_OPENAI_API_KEY` removed from `.env.example`.
 
-Still open (requires OAuth app registrations / larger scope): wiring the web UI to the real OAuth flow and provider save calls, provider-side duplicate search on save, provider-side undo, desktop (Tauri) implementation, AI extraction layer, ESLint/Prettier.
+Done in the second remediation pass:
+
+- **Real save path wired end-to-end** — the web app now runs OAuth (Microsoft: auth-code + PKCE with silent refresh; Google: implicit token flow, no secret in the bundle), searches the real address book for duplicates by email before saving, creates/updates via the provider APIs, records real contact IDs in history, and Undo deletes a created contact provider-side. Demo mode (local-log only) remains the automatic fallback when no client ID is configured.
+- **Provider packages** — `deleteGoogleContact`/`deleteMicrosoftContact`, `getGoogleContactEtag` (required for People API updates), and a Google implicit-flow option; all tested with mocked fetch.
+- **Duplicate matching** — nickname-aware (Bob ↔ Robert), single-typo-tolerant for long names, first-initial matching; exact email match recommends "update".
+- **Parser** — forwarded-email handling (prefers the original sender after the "Forwarded message" marker), quoted-reply/`On … wrote:` line stripping, ALL-CAPS name normalization.
+- **Eval harness** — ground-truth corpus (`packages/parser/eval/corpus.ts`), per-field accuracy report (`npm run eval`), and CI-enforced accuracy floors.
+- **UX** — Ctrl/Cmd+Enter saves from the capture view.
+
+Still open (requires deployment or credentials): Outlook add-in capture surface, background inbox signature scanning, Apollo enrichment, AI extraction fallback layer, desktop (Tauri) implementation, ESLint/Prettier.
 
 ---
 

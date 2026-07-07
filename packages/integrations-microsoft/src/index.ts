@@ -183,6 +183,14 @@ export async function createMicrosoftContact(accessToken: string, contact: Parse
   };
 }
 
+export async function deleteMicrosoftContact(accessToken: string, id: string): Promise<void> {
+  const response = await fetch(`${graphBaseUrl}/me/contacts/${id}`, {
+    method: "DELETE",
+    headers: { Authorization: `Bearer ${accessToken}` }
+  });
+  await assertOk(response, "delete Microsoft contact");
+}
+
 export async function updateMicrosoftContact(accessToken: string, id: string, contact: ParsedContact): Promise<SaveContactResult> {
   const response = await fetch(`${graphBaseUrl}/me/contacts/${id}`, {
     method: "PATCH",

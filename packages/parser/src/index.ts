@@ -27,7 +27,69 @@ const signOffRegex = /^(?:thanks|thank you|many thanks|best|all the best|best re
 const nameLabelRegex = /^(?:contact|attn|name)\s*[:\-]\s*/i;
 const credentialSuffixRegex = /,\s*(?:mba|cpa|phd|ph\.?d\.?|md|esq\.?|jd|cfa|cfp|pmp|pe|rn|jr\.?|sr\.?|ii|iii|iv)\b\.?/gi;
 const nameRegex = /^\p{Lu}[\p{L}.'’-]+(?:\s+\p{Lu}[\p{L}.'’-]+){1,3}$/u;
+const allCapsNameRegex = /^\p{Lu}[\p{Lu} .'’-]+$/u;
+const forwardedMarkerRegex = /-*\s*(?:begin )?forwarded message\s*-*/i;
+const quotedReplyLineRegex = /^(?:>|On .{4,80} wrote:?\s*$)/i;
 const disposableDomainWords = ["gmail", "icloud", "outlook", "hotmail", "yahoo", "proton", "me", "aol"];
+
+// Common English nickname groups for duplicate matching (Bob ↔ Robert).
+const nicknameGroups: string[][] = [
+  ["robert", "rob", "bob", "bobby"],
+  ["william", "will", "bill", "billy"],
+  ["michael", "mike"],
+  ["james", "jim", "jimmy"],
+  ["elizabeth", "liz", "beth", "lizzie"],
+  ["katherine", "kate", "katie", "kathy"],
+  ["thomas", "tom", "tommy"],
+  ["anthony", "tony"],
+  ["andrew", "andy", "drew"],
+  ["christopher", "chris"],
+  ["daniel", "dan", "danny"],
+  ["david", "dave"],
+  ["edward", "ed", "eddie"],
+  ["gregory", "greg"],
+  ["jeffrey", "jeff"],
+  ["joseph", "joe", "joey"],
+  ["jonathan", "jon"],
+  ["john", "jack", "johnny"],
+  ["matthew", "matt"],
+  ["nicholas", "nick"],
+  ["patrick", "pat"],
+  ["peter", "pete"],
+  ["richard", "rick", "rich"],
+  ["ronald", "ron"],
+  ["samuel", "sam"],
+  ["steven", "steve"],
+  ["stephen", "steve"],
+  ["susan", "sue"],
+  ["theodore", "ted"],
+  ["margaret", "maggie", "meg", "peggy"],
+  ["jennifer", "jen", "jenny"],
+  ["rebecca", "becky"],
+  ["alexander", "alex"],
+  ["benjamin", "ben"],
+  ["charles", "charlie", "chuck"],
+  ["timothy", "tim"],
+  ["kenneth", "ken"],
+  ["lawrence", "larry"],
+  ["donald", "don"],
+  ["raymond", "ray"],
+  ["frederick", "fred"],
+  ["victoria", "vicky"],
+  ["deborah", "deb", "debbie"],
+  ["pamela", "pam"],
+  ["cynthia", "cindy"],
+  ["sandra", "sandy"]
+];
+
+const nicknameCanonical = new Map<string, string>();
+for (const group of nicknameGroups) {
+  // Merge overlapping groups (e.g. "steve" appears under both Steven and
+  // Stephen) so every variant resolves to a single canonical form.
+  const existing = group.map((name) => nicknameCanonical.get(name)).find(Boolean);
+  const canonical = existing ?? group[0];
+  for (const name of group) nicknameCanonical.set(name, canonical);
+}
 
 const titleWords = [
   "chief",
@@ -182,7 +244,7 @@ export function findDuplicateContacts(candidate: ParsedContact, existing: Parsed
         reasons.push("matching phone");
       }
 
-      if (candidate.fullName && contact.fullName && normalizeName(candidate.fullName) === normalizeName(contact.fullName)) {
+      if (candidate.fullName && contact.fullName && personNamesMatch(candidate.fullName, contact.fullName)) {
         score += candidate.company && contact.company && normalizeName(candidate.company) === normalizeName(contact.company) ? 0.25 : 0.12;
         reasons.push("matching name");
       }
@@ -204,11 +266,51 @@ export function findDuplicateContacts(candidate: ParsedContact, existing: Parsed
     .sort((a, b) => b.score - a.score);
 }
 
+// Nickname-aware, typo-tolerant person-name comparison for duplicate matching.
+export function personNamesMatch(a: string, b: string): boolean {
+  if (normalizeName(a) === normalizeName(b)) return true;
+  const aParts = a.toLowerCase().split(/\s+/).map(normalizeName).filter(Boolean);
+  const bParts = b.toLowerCase().split(/\s+/).map(normalizeName).filter(Boolean);
+  if (aParts.length < 2 || bParts.length < 2) return false;
+  const [aFirst, aLast] = [aParts[0], aParts[aParts.length - 1]];
+  const [bFirst, bLast] = [bParts[0], bParts[bParts.length - 1]];
+  const lastMatch = aLast === bLast || withinOneEdit(aLast, bLast);
+  if (!lastMatch) return false;
+  const aCanon = nicknameCanonical.get(aFirst) ?? aFirst;
+  const bCanon = nicknameCanonical.get(bFirst) ?? bFirst;
+  if (aCanon === bCanon || withinOneEdit(aCanon, bCanon)) return true;
+  // Initial vs full first name: "J Smith" ↔ "Jordan Smith".
+  return (aFirst.length === 1 || bFirst.length === 1) && aFirst[0] === bFirst[0];
+}
+
+// Single-typo tolerance, only for names long enough that one edit is unlikely
+// to turn one real name into a different real name (Dan/Don must not match).
+function withinOneEdit(a: string, b: string): boolean {
+  if (a.length < 5 || b.length < 5 || Math.abs(a.length - b.length) > 1) return false;
+  if (a === b) return true;
+  let i = 0;
+  let j = 0;
+  let edits = 0;
+  while (i < a.length && j < b.length) {
+    if (a[i] === b[j]) { i++; j++; continue; }
+    if (++edits > 1) return false;
+    if (a.length > b.length) i++;
+    else if (b.length > a.length) j++;
+    else { i++; j++; }
+  }
+  return edits + (a.length - i) + (b.length - j) <= 1;
+}
+
 function extractHeaderName(text: string): { name: string; email: string } | undefined {
+  // In a forwarded email the interesting person is the original sender, whose
+  // From: line follows the "Forwarded message" marker — not the forwarder.
+  const forwardedMarker = text.match(forwardedMarkerRegex);
+  const searchText = forwardedMarker ? text.slice((forwardedMarker.index ?? 0) + forwardedMarker[0].length) : text;
   for (const regex of [emailHeaderNameRegex, bareNameEmailRegex]) {
     regex.lastIndex = 0;
-    const match = regex.exec(text);
+    const match = regex.exec(searchText);
     if (!match) continue;
+    if (/^on\b/i.test(match[1])) continue;
     const name = cleanNameCandidate(match[1]);
     if (name && nameRegex.test(name)) {
       return { name, email: match[2].toLowerCase() };
@@ -229,7 +331,7 @@ function toSegments(text: string): string[] {
     .split(/\r?\n/)
     .map((line) => line.trim())
     .filter(Boolean)
-    .filter((line) => !isDisclaimerLine(line) && !headerLineRegex.test(line))
+    .filter((line) => !isDisclaimerLine(line) && !headerLineRegex.test(line) && !quotedReplyLineRegex.test(line))
     .flatMap((line) => line.split(/\s*[|•·]\s*|\s+[–—]\s+/))
     .map((segment) => segment.trim())
     .filter(Boolean);
@@ -306,8 +408,13 @@ function extractName(segments: string[], emails: string[]): string | undefined {
   for (const segment of segments) {
     if (segment.length > 48 || segment.includes("@") || /https?:|www\.|linkedin\.com/i.test(segment)) continue;
     if (/[0-9]/.test(segment) || signOffRegex.test(segment)) continue;
-    const cleaned = cleanNameCandidate(segment);
+    let cleaned = cleanNameCandidate(segment);
     if (!cleaned || isTitleLine(cleaned) || isCompanyLine(cleaned)) continue;
+    // ALL-CAPS signatures ("JOHN SMITH") — normalize case before matching,
+    // since nameRegex alone cannot tell all-caps from normal capitalization.
+    if (cleaned.includes(" ") && allCapsNameRegex.test(cleaned)) {
+      cleaned = titleCase(cleaned);
+    }
     if (nameRegex.test(cleaned)) return cleaned;
   }
 
@@ -466,5 +573,6 @@ function round(value: number): number {
 }
 
 export const internals = {
-  normalizePhone
+  normalizePhone,
+  personNamesMatch
 };
