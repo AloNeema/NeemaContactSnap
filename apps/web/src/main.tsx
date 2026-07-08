@@ -7,6 +7,7 @@ import {
   Clipboard,
   Cloud,
   FileText,
+  Gem,
   History,
   KeyRound,
   Merge,
@@ -49,11 +50,16 @@ type ViewName = "capture" | "history" | "settings";
 type Destination = "google" | "microsoft" | "both";
 type SaveMode = "create" | "update";
 type SaveState = "idle" | "parsing" | "saving";
+type ThemeName = "dark" | "light" | "luxe";
+
+const themeOrder: ThemeName[] = ["dark", "light", "luxe"];
+const themeLabels: Record<ThemeName, string> = { dark: "Dark", light: "Light", luxe: "Luxe" };
 
 const storageKeys = {
   history: "contactsnap.history",
   privacy: "contactsnap.privacy",
-  connections: "contactsnap.connections"
+  connections: "contactsnap.connections",
+  theme: "contactsnap.theme"
 } as const;
 
 function loadStored<T>(key: string, fallback: T): T {
@@ -84,7 +90,10 @@ function persist(key: string, value: unknown) {
 }
 
 function App() {
-  const [theme, setTheme] = useState<"dark" | "light">("dark");
+  const [theme, setTheme] = useState<ThemeName>(() => {
+    const stored = window.localStorage.getItem(storageKeys.theme);
+    return themeOrder.includes(stored as ThemeName) ? (stored as ThemeName) : "dark";
+  });
   const [sourceText, setSourceText] = useState(exampleText);
   const [contact, setContact] = useState<ParsedContact>(() => parseContact({ text: exampleText, source: "manual_paste" }));
   const [history, setHistory] = useState<ImportLogEntry[]>(() => loadStoredArray<ImportLogEntry>(storageKeys.history));
@@ -118,6 +127,15 @@ function App() {
   useEffect(() => persist(storageKeys.history, history), [history]);
   useEffect(() => persist(storageKeys.privacy, privacy), [privacy]);
   useEffect(() => persist(storageKeys.connections, { google: googleConnected, microsoft: microsoftConnected }), [googleConnected, microsoftConnected]);
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(storageKeys.theme, theme);
+    } catch {
+      // Storage may be unavailable; the theme still applies for this session.
+    }
+  }, [theme]);
+
+  const nextTheme = themeOrder[(themeOrder.indexOf(theme) + 1) % themeOrder.length];
 
   // Finish an OAuth redirect if this page load is one.
   useEffect(() => {
@@ -317,8 +335,11 @@ function App() {
           <Connection label="Google" connected={googleConnected} onClick={() => void toggleConnection("google", !googleConnected)} />
           <Connection label="Outlook" connected={microsoftConnected} onClick={() => void toggleConnection("microsoft", !microsoftConnected)} />
         </div>
-        <Button icon={theme === "dark" ? <Sun size={16} /> : <Moon size={16} />} onClick={() => setTheme(theme === "dark" ? "light" : "dark")}>
-          {theme === "dark" ? "Light" : "Dark"}
+        <Button
+          icon={nextTheme === "light" ? <Sun size={16} /> : nextTheme === "luxe" ? <Gem size={16} /> : <Moon size={16} />}
+          onClick={() => setTheme(nextTheme)}
+        >
+          {themeLabels[nextTheme]}
         </Button>
       </aside>
 

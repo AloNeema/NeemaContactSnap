@@ -46,6 +46,49 @@ textarea {
   --accent-2: #18895e;
 }
 
+/* Luxe: cream and bone surfaces, espresso ink, antique-gold accents. */
+.app.luxe {
+  --bg: #f4efe4;
+  --panel: #fdfaf2;
+  --panel-2: #ece4d2;
+  --text: #2e2921;
+  --muted: #857962;
+  --line: #ddd2ba;
+  --accent: #a5813b;
+  --accent-2: #c3a15c;
+  --warn: #a16e0c;
+  --danger: #a6453b;
+  color-scheme: light;
+}
+
+.app.luxe h1,
+.app.luxe h2,
+.app.luxe .brand strong {
+  font-family: Georgia, "Times New Roman", serif;
+  letter-spacing: 0.3px;
+  font-weight: 600;
+}
+
+.app.luxe .status-good {
+  color: #7c6224;
+}
+
+.app.luxe .brand-mark,
+.app.luxe .button-primary {
+  color: #241d10;
+}
+
+.app.luxe .input-panel,
+.app.luxe .review-panel,
+.app.luxe .history-view,
+.app.luxe .settings-view {
+  box-shadow: 0 1px 2px rgba(72, 60, 38, 0.06), 0 8px 24px rgba(72, 60, 38, 0.07);
+}
+
+.app.luxe .switch.on {
+  color: #241d10;
+}
+
 .sidebar {
   min-height: 100vh;
   padding: 18px;
